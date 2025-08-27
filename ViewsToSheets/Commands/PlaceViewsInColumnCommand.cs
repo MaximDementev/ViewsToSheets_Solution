@@ -76,7 +76,7 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 var doc = uiDoc.Document;
 
                 // Получаем выбранные виды
-                var selectedViews = GetSelectedViews(uiDoc);
+                List<View> selectedViews = GetSelectedViews(uiDoc);
                 if (selectedViews == null || !selectedViews.Any())
                 {
                     TaskDialog.Show(Messages.ERROR_TITLE, Messages.NO_VIEWS_SELECTED);
@@ -116,11 +116,7 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 }
 
                 // Запрашиваем расстояние между видами
-                double spacing = GetSpacingFromUser();
-                if (spacing <= 0)
-                {
-                    return Result.Cancelled;
-                }
+                double spacing = Constants.SPACING_LARGE;
 
                 // Размещаем виды на листе
                 using (Transaction trans = new Transaction(doc, Messages.TRANSACTION_NAME))
@@ -206,71 +202,53 @@ namespace MagicEntry.Plugins.ViewsToSheets
         }
 
         /// <summary>
-        /// Запрашивает у пользователя расстояние между видами.
-        /// </summary>
-        private double GetSpacingFromUser()
-        {
-            var dialog = new TaskDialog(Messages.SPACING_DIALOG_TITLE);
-            dialog.MainInstruction = Messages.SPACING_INSTRUCTION;
-            dialog.MainContent = Messages.SPACING_DIALOG_CONTENT;
-
-            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1,
-                string.Format(Messages.SPACING_OPTION_SMALL, Constants.SPACING_SMALL));
-            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2,
-                string.Format(Messages.SPACING_OPTION_MEDIUM, Constants.SPACING_MEDIUM));
-            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink3,
-                string.Format(Messages.SPACING_OPTION_LARGE, Constants.SPACING_LARGE));
-
-            dialog.CommonButtons = TaskDialogCommonButtons.Cancel;
-            dialog.DefaultButton = TaskDialogResult.CommandLink2;
-
-            var result = dialog.Show();
-
-            switch (result)
-            {
-                case TaskDialogResult.CommandLink1:
-                    return Constants.SPACING_SMALL;
-                case TaskDialogResult.CommandLink2:
-                    return Constants.SPACING_MEDIUM;
-                case TaskDialogResult.CommandLink3:
-                    return Constants.SPACING_LARGE;
-                default:
-                    return -1;
-            }
-        }
-
-        /// <summary>
-        /// Размещает виды в столбик на указанном листе с выравниванием по левой грани.
+        /// Размещает виды в столбик справа от общего контура элементов на листе, 
+        /// с выравниванием по левой грани.
         /// </summary>
         private bool PlaceViewsInColumn(Document doc, List<View> views, ViewSheet sheet, double spacingMm)
         {
             try
             {
                 var spacingFeet = spacingMm * Constants.MM_TO_FEET;
-                var startPosition = new XYZ(Constants.START_POSITION_X, Constants.START_POSITION_Y, 0);
-                var currentY = startPosition.Y;
-                var leftAlignmentX = startPosition.X; // фиксированная X координата для выравнивания по левой грани
+
+                // Получаем все элементы на листе
+                var (viewports, titleBlocks) = GetSheetElements(doc, sheet);
+                var combinedOutline = GetCombinedOutline(doc, viewports, titleBlocks);
+                if (combinedOutline == null)
+                    return false;
+
+                // Правая граница существующих элементов
+                double rightEdgeX = combinedOutline.MaximumPoint.X;
+
+                // Начальная позиция для первого вида
+                double currentY = combinedOutline.MaximumPoint.Y; // сверху вниз
+                double leftAlignmentX = rightEdgeX + Constants.SPACING_LARGE / Constants.FEET_TO_MM; // смещение вправо
 
                 foreach (var view in views)
                 {
                     if (!Viewport.CanAddViewToSheet(doc, sheet.Id, view.Id))
                         continue;
 
+                    // Создаём в нуле, потом передвигаем
                     var tempPosition = new XYZ(0, currentY, 0);
                     var viewport = Viewport.Create(doc, sheet.Id, view.Id, tempPosition);
                     if (viewport == null)
                         continue;
 
+                    // Размер вьюпорта
                     var outline = viewport.GetBoxOutline();
                     double viewportHeight = outline.MaximumPoint.Y - outline.MinimumPoint.Y;
                     double viewportLeft = outline.MinimumPoint.X;
 
+                    // Выравнивание по левой грани
                     double offsetX = leftAlignmentX - viewportLeft;
-                    var finalPosition = new XYZ(tempPosition.X + offsetX, currentY, 0);
 
+                    // Итоговая позиция центра
+                    var finalPosition = new XYZ(tempPosition.X + offsetX, currentY, 0);
                     viewport.SetBoxCenter(finalPosition);
 
-                    currentY = currentY - viewportHeight - spacingFeet;
+                    // Смещаемся вниз на высоту + зазор
+                    currentY -= viewportHeight + spacingFeet;
                 }
 
                 return true;
@@ -279,6 +257,94 @@ namespace MagicEntry.Plugins.ViewsToSheets
             {
                 return false;
             }
+        }
+
+        private (List<Viewport> viewports, List<FamilyInstance> titleBlocks) GetSheetElements(Document doc, ViewSheet sheet)
+        {
+            var viewports = new FilteredElementCollector(doc, sheet.Id)
+                .OfClass(typeof(Viewport))
+                .Cast<Viewport>()
+                .ToList();
+
+            var titleBlocks = new FilteredElementCollector(doc, sheet.Id)
+                .OfClass(typeof(FamilyInstance))
+                .Cast<FamilyInstance>()
+                .Where(fi => fi.Category?.Id.IntegerValue == (int)BuiltInCategory.OST_TitleBlocks)
+                .ToList();
+
+            return (viewports, titleBlocks);
+        }
+
+        private Outline GetCombinedOutline(Document doc, List<Viewport> viewports, List<FamilyInstance> titleBlocks)
+        {
+            List<Outline> outlines = new List<Outline>();
+
+            // Вьюпорты
+            foreach (var vp in viewports)
+            {
+                Outline vpOutline = vp.GetBoxOutline();
+                if (vpOutline != null)
+                    outlines.Add(vpOutline);
+            }
+
+            // Основные надписи
+            foreach (var tb in titleBlocks)
+            {
+                Outline tbOutline = GetTitleBlockOutline(tb);
+                if (tbOutline != null)
+                    outlines.Add(tbOutline);
+            }
+
+            if (!outlines.Any())
+                return null;
+
+            // Общие min/max по всем
+            double minX = outlines.Min(o => o.MinimumPoint.X);
+            double minY = outlines.Min(o => o.MinimumPoint.Y);
+            double maxX = outlines.Max(o => o.MaximumPoint.X);
+            double maxY = outlines.Max(o => o.MaximumPoint.Y);
+
+            return new Outline(new XYZ(minX, minY, 0), new XYZ(maxX, maxY, 0));
+        }
+
+        private Outline GetTitleBlockOutline(FamilyInstance titleBlock)
+        {
+            LocationPoint loc = titleBlock.Location as LocationPoint;
+            if (loc == null) return null;
+
+            XYZ origin = loc.Point;              // точка вставки (внизу справа)
+            double rotation = loc.Rotation;      // угол поворота
+
+            double width = titleBlock.get_Parameter(BuiltInParameter.SHEET_WIDTH).AsDouble();
+            double height = titleBlock.get_Parameter(BuiltInParameter.SHEET_HEIGHT).AsDouble();
+
+            // Локальные точки (в системе координат рамки)
+            // Вставка = (0,0) нижний правый угол
+            List<XYZ> localCorners = new List<XYZ>
+                {
+                    new XYZ(0, 0, 0),           // нижний правый
+                    new XYZ(-width, 0, 0),      // нижний левый
+                    new XYZ(-width, height, 0), // верхний левый
+                    new XYZ(0, height, 0)       // верхний правый
+                };
+
+            // Матрица поворота вокруг Z
+            Transform rot = Transform.CreateRotationAtPoint(XYZ.BasisZ, rotation, origin);
+
+            // Применяем трансформацию к углам
+            List<XYZ> worldCorners = localCorners.Select(p => rot.OfPoint(p + origin)).ToList();
+
+            // Строим Outline по углам
+            XYZ min = new XYZ(
+                worldCorners.Min(p => p.X),
+                worldCorners.Min(p => p.Y),
+                0);
+            XYZ max = new XYZ(
+                worldCorners.Max(p => p.X),
+                worldCorners.Max(p => p.Y),
+                0);
+
+            return new Outline(min, max);
         }
 
         #endregion

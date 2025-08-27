@@ -113,13 +113,13 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 {
                     trans.Start();
 
-                    bool success = CreateSheetsFromTitleBlockGroups(doc, activeSheet, titleBlockGroups);
+                    int successSheetsCount = CreateSheetsFromTitleBlockGroups(doc, activeSheet, titleBlockGroups);
 
-                    if (success)
+                    if (successSheetsCount > 0)
                     {
                         trans.Commit();
                         TaskDialog.Show(Messages.SUCCESS_TITLE,
-                            string.Format(Messages.SHEETS_CREATED_SUCCESS, titleBlockGroups.Count - 1));
+                            string.Format(Messages.SHEETS_CREATED_SUCCESS, successSheetsCount));
                         return Result.Succeeded;
                     }
                     else
@@ -263,9 +263,10 @@ namespace MagicEntry.Plugins.ViewsToSheets
         /// <summary>
         /// Создает новые листы для каждой группы основных надписей и переносит виды.
         /// </summary>
-        private bool CreateSheetsFromTitleBlockGroups(Document doc, ViewSheet originalSheet,
+        private int CreateSheetsFromTitleBlockGroups(Document doc, ViewSheet originalSheet,
             Dictionary<FamilyInstance, List<Viewport>> titleBlockGroups)
         {
+            int successSheetsCount = 0;
             try
             {
                 var groupsList = titleBlockGroups.ToList();
@@ -273,11 +274,12 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 // Оставляем первую группу на исходном листе, создаем новые листы для остальных
                 for (int i = 1; i < groupsList.Count; i++)
                 {
-                    var originalTitleBlock = groupsList[i].Key;
-                    var viewports = groupsList[i].Value;
+                    FamilyInstance originalTitleBlock = groupsList[i].Key;
+                    List<Viewport> viewports = groupsList[i].Value;
+                    if (viewports.Count == 0) continue;
 
                     // Создаем новый лист
-                    ViewSheet newSheet = CreateNewSheet(doc, originalSheet, originalTitleBlock, i);
+                    ViewSheet newSheet = CreateNewSheet(doc, originalSheet, originalTitleBlock, viewports, i);
                     if (newSheet == null) continue;
 
 
@@ -290,26 +292,28 @@ namespace MagicEntry.Plugins.ViewsToSheets
                     // Копируем параметры основной надписи
                     var targetTitleBlock = GetTitleBlocksOnSheet(doc, newSheet).FirstOrDefault();
                     ParameterCopyService.CopyTitleBlockParameters(originalTitleBlock, targetTitleBlock);
+
+                    successSheetsCount++;
                 }
 
                 // Удаляем лишние основные надписи с исходного листа
                 for (int i = 1; i < groupsList.Count; i++)
                 {
+                    if(groupsList[i].Value.Count !=0)
                     doc.Delete(groupsList[i].Key.Id);
                 }
-
-                return true;
+                return successSheetsCount;
             }
             catch
             {
-                return false;
+                return successSheetsCount;
             }
         }
 
         /// <summary>
         /// Создает новый лист на основе исходного.
         /// </summary>
-        private ViewSheet CreateNewSheet(Document doc, ViewSheet originalSheet, FamilyInstance titleBlock, int index)
+        private ViewSheet CreateNewSheet(Document doc, ViewSheet originalSheet, FamilyInstance titleBlock, List<Viewport> viewports, int index)
         {
             try
             {
@@ -319,8 +323,10 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 if (sheetType == null) return null;
 
                 // Создаем уникальный номер и имя листа
-                var sheetNumber = $"{originalSheet.SheetNumber}-{index}";
-                var sheetName = $"{originalSheet.Name} - Часть {index}";
+                string sheetName = GetViewsNamesString(doc, viewports);
+                sheetName = GetUniqueViewName(doc, sheetName);
+                string sheetNumber = $"{originalSheet.SheetNumber}-{index}";
+                sheetNumber = GetUniqueSheetNumber(doc, sheetNumber);
 
                 // Берем ID типа основной надписи из оригинального листа
                 ElementId titleBlockTypeId = titleBlock.GetTypeId();
@@ -348,6 +354,64 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 return null;
             }
         }
+
+        private string GetUniqueViewName(Document doc, string baseName)
+        {
+            var existingNames = new FilteredElementCollector(doc)
+                .OfClass(typeof(View))
+                .Cast<View>()
+                .Select(v => v.Name)
+                .ToHashSet();
+
+            if (!existingNames.Contains(baseName))
+                return baseName;
+
+            int counter = 1;
+            string newName;
+            do
+            {
+                newName = $"{baseName} ({counter})";
+                counter++;
+            }
+            while (existingNames.Contains(newName));
+
+            return newName;
+        }
+
+        private string GetUniqueSheetNumber(Document doc, string baseNumber)
+        {
+            var existingNumbers = new FilteredElementCollector(doc)
+                .OfClass(typeof(ViewSheet))
+                .Cast<ViewSheet>()
+                .Select(s => s.SheetNumber)
+                .ToHashSet();
+
+            if (!existingNumbers.Contains(baseNumber))
+                return baseNumber;
+
+            int counter = 1;
+            string newNumber;
+            do
+            {
+                newNumber = $"{baseNumber} ({counter})";
+                counter++;
+            }
+            while (existingNumbers.Contains(newNumber));
+
+            return newNumber;
+        }
+
+        private string GetViewsNamesString(Document doc, List<Viewport> viewports)
+        {
+            var names = viewports
+                .Select(vp => doc.GetElement(vp.ViewId) as View)
+                .Where(v => v != null)
+                .Select(v => v.Name)
+                .ToList();
+
+            return string.Join(". ", names);
+        }
+
 
         /// <summary>
         /// Переносит виды из i-й группы (основная надпись + её виды)
