@@ -178,6 +178,11 @@ namespace MagicEntry.Plugins.ViewsToSheets.Services
             View view = doc.GetElement(viewport.ViewId) as View;
             if (view == null) return;
 
+            ElementId viewportTypeId = viewport.GetTypeId();
+            XYZ titlePosition = GetViewportTitlePosition(viewport);
+            XYZ viewportCenter = GetOutlineCenter(viewport.GetBoxOutline()); // центр старого viewport
+            XYZ relativeTitleOffset = titlePosition - viewportCenter;
+
             // Вычисляем относительное положение
             Outline outline = viewport.GetBoxOutline();
             XYZ max = outline.MaximumPoint;
@@ -186,6 +191,7 @@ namespace MagicEntry.Plugins.ViewsToSheets.Services
 
             XYZ relativeOffset = max - basePoint;
             XYZ newPos = relativeOffset - new XYZ(width / 2, height / 2, 0);
+            XYZ newTitlePosition = GetNewTitlePosition(relativeTitleOffset, newPos);
 
             // Удаляем старый viewport
             doc.Delete(viewport.Id);
@@ -194,7 +200,13 @@ namespace MagicEntry.Plugins.ViewsToSheets.Services
             if (Viewport.CanAddViewToSheet(doc, targetSheet.Id, view.Id))
             {
                 Viewport newVp = Viewport.Create(doc, targetSheet.Id, view.Id, newPos);
-                if (newVp == null)
+                if (newVp != null)
+                {
+                    newVp.ChangeTypeId(viewportTypeId);
+
+                    SetViewportTitlePosition(newVp, newTitlePosition);
+                }
+                else
                 {
                     System.Diagnostics.Debug.WriteLine($"Ошибка: не удалось создать viewport для вида {view.Name}");
                 }
@@ -204,6 +216,65 @@ namespace MagicEntry.Plugins.ViewsToSheets.Services
                 System.Diagnostics.Debug.WriteLine($"Вид {view.Name} нельзя добавить на лист {targetSheet.Name}");
             }
         }
+
+        private XYZ GetOutlineCenter(Outline outline)
+        {
+            double centerX = (outline.MinimumPoint.X + outline.MaximumPoint.X) / 2.0;
+            double centerY = (outline.MinimumPoint.Y + outline.MaximumPoint.Y) / 2.0;
+            double centerZ = (outline.MinimumPoint.Z + outline.MaximumPoint.Z) / 2.0; // обычно 0 для листа
+
+            return new XYZ(centerX, centerY, centerZ);
+        }
+
+
+        #region Title Methods
+        /// <summary>
+        /// Получает информацию о настройках Title для viewport.
+        /// </summary>
+        private XYZ GetViewportTitlePosition(Viewport viewport)
+        {
+            // Берем центр области заголовка
+            Outline outline = viewport.GetLabelOutline();
+            XYZ min = outline.MinimumPoint;
+            XYZ max = outline.MaximumPoint;
+
+            return (min + max) / 2.0;
+        }
+
+
+        /// <summary>
+        /// Применяет настройки Title к viewport.
+        /// </summary>
+        private void SetViewportTitlePosition(Viewport viewport, XYZ newPosition)
+        {
+            XYZ currentPosition = GetViewportTitlePosition(viewport);
+            XYZ offset = newPosition - currentPosition;
+
+                viewport.LabelOffset += offset;
+        }
+
+        /// <summary>
+        /// Возвращает относительное положение заголовка относительно базовой точки.
+        /// </summary>
+        /// <param name="titlePosition">Положение заголовка</param>
+        /// <param name="basePoint">Базовая точка</param>
+        /// <returns>Относительное положение</returns>
+        private XYZ GetRelativeTitlePosition(XYZ titlePosition, XYZ basePoint)
+        {
+            return titlePosition - basePoint;
+        }
+
+        /// <summary>
+        /// Возвращает новое положение заголовка на основе относительного смещения и новой позиции.
+        /// </summary>
+        /// <param name="relativeTitlePosition">Относительное смещение заголовка</param>
+        /// <param name="newPos">Новая базовая позиция</param>
+        /// <returns>Новое положение заголовка</returns>
+        private XYZ GetNewTitlePosition(XYZ relativeTitlePosition, XYZ newPos)
+        {
+            return newPos + relativeTitlePosition;
+        }
+        #endregion
 
         #endregion
     }
