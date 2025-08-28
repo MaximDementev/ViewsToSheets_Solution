@@ -204,8 +204,11 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 {
                     Outline tbOutline = GetTitleBlockOutline(titleBlock);
 
+                    bool isIntersect = vpOutline.Intersects(tbOutline, 0.0);
+                    bool isVpInTb = IsOutlineCenterInside(vpOutline, tbOutline);
+
                     // Проверяем пересечение прямоугольников
-                    if (vpOutline.Intersects(tbOutline, 0.0))
+                    if (isIntersect || isVpInTb)
                     {
                         containingTitleBlock = titleBlock;
                         break;
@@ -220,45 +223,39 @@ namespace MagicEntry.Plugins.ViewsToSheets
             return groups;
         }
 
+        private bool IsOutlineCenterInside(Outline inner, Outline outer)
+        {
+            if (inner == null || outer == null)
+                return false;
+
+            // Центр по XY
+            XYZ center = (inner.MinimumPoint + inner.MaximumPoint) / 2;
+
+            return
+                center.X >= outer.MinimumPoint.X &&
+                center.X <= outer.MaximumPoint.X &&
+                center.Y >= outer.MinimumPoint.Y &&
+                center.Y <= outer.MaximumPoint.Y;
+        }
+
+
         private Outline GetTitleBlockOutline(FamilyInstance titleBlock)
         {
             LocationPoint loc = titleBlock.Location as LocationPoint;
             if (loc == null) return null;
 
-            XYZ origin = loc.Point;              // точка вставки (внизу справа)
-            double rotation = loc.Rotation;      // угол поворота
+            XYZ origin = loc.Point; // точка вставки (нижний правый угол)
 
             double width = titleBlock.get_Parameter(BuiltInParameter.SHEET_WIDTH).AsDouble();
             double height = titleBlock.get_Parameter(BuiltInParameter.SHEET_HEIGHT).AsDouble();
 
-            // Локальные точки (в системе координат рамки)
-            // Вставка = (0,0) нижний правый угол
-            List<XYZ> localCorners = new List<XYZ>
-                {
-                    new XYZ(0, 0, 0),           // нижний правый
-                    new XYZ(-width, 0, 0),      // нижний левый
-                    new XYZ(-width, height, 0), // верхний левый
-                    new XYZ(0, height, 0)       // верхний правый
-                };
-
-            // Матрица поворота вокруг Z
-            Transform rot = Transform.CreateRotationAtPoint(XYZ.BasisZ, rotation, origin);
-
-            // Применяем трансформацию к углам
-            List<XYZ> worldCorners = localCorners.Select(p => rot.OfPoint(p + origin)).ToList();
-
-            // Строим Outline по углам
-            XYZ min = new XYZ(
-                worldCorners.Min(p => p.X),
-                worldCorners.Min(p => p.Y),
-                0);
-            XYZ max = new XYZ(
-                worldCorners.Max(p => p.X),
-                worldCorners.Max(p => p.Y),
-                0);
+            // Нижний левый и верхний правый
+            XYZ min = new XYZ(origin.X - width, origin.Y, 0);
+            XYZ max = new XYZ(origin.X, origin.Y + height, 0);
 
             return new Outline(min, max);
         }
+
 
         /// <summary>
         /// Создает новые листы для каждой группы основных надписей и переносит виды.
