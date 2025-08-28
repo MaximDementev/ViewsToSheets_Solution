@@ -61,6 +61,10 @@
     <Compile Include="Constants\Messages.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Servises\ParameterCopyService.cs" />
+    <Compile Include="Servises\SheetService.cs" />
+    <Compile Include="Servises\TitleBlockService.cs" />
+    <Compile Include="Servises\ViewportPlacementService.cs" />
+    <Compile Include="Servises\ViewService.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

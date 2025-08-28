@@ -4,11 +4,10 @@ using Autodesk.Revit.UI;
 using MagicEntry.Core.Interfaces;
 using MagicEntry.Core.Models;
 using MagicEntry.Core.Services;
+using MagicEntry.Plugins.ViewsToSheets.Services;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.Remoting.Messaging;
-using ViewsToSheets.Servises;
 
 namespace MagicEntry.Plugins.ViewsToSheets
 {
@@ -21,6 +20,30 @@ namespace MagicEntry.Plugins.ViewsToSheets
     [Regeneration(RegenerationOption.Manual)]
     public class CreateSheetsFromTitleBlocksCommand : IExternalCommand, IPlugin
     {
+        #region Fields
+
+        private readonly ViewService _viewService;
+        private readonly TitleBlockService _titleBlockService;
+        private readonly SheetService _sheetService;
+        private readonly ViewportPlacementService _placementService;
+
+        #endregion
+
+        #region Constructor
+
+        /// <summary>
+        /// Инициализирует новый экземпляр команды создания листов из основных надписей.
+        /// </summary>
+        public CreateSheetsFromTitleBlocksCommand()
+        {
+            _viewService = new ViewService();
+            _titleBlockService = new TitleBlockService();
+            _sheetService = new SheetService();
+            _placementService = new ViewportPlacementService();
+        }
+
+        #endregion
+
         #region IPlugin Implementation
 
         /// <summary>
@@ -36,6 +59,7 @@ namespace MagicEntry.Plugins.ViewsToSheets
         /// <summary>
         /// Выполняет внутреннюю инициализацию плагина при загрузке системы.
         /// </summary>
+        /// <returns>True в случае успешной инициализации</returns>
         public bool Initialize()
         {
             try
@@ -70,6 +94,10 @@ namespace MagicEntry.Plugins.ViewsToSheets
         /// <summary>
         /// Точка входа для выполнения команды создания листов из основных надписей.
         /// </summary>
+        /// <param name="commandData">Данные команды</param>
+        /// <param name="message">Сообщение об ошибке</param>
+        /// <param name="elements">Набор элементов</param>
+        /// <returns>Результат выполнения команды</returns>
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             try
@@ -77,58 +105,16 @@ namespace MagicEntry.Plugins.ViewsToSheets
                 var uiDoc = commandData.Application.ActiveUIDocument;
                 var doc = uiDoc.Document;
 
-                // Проверяем, что активный вид - это лист
-                if (!(uiDoc.ActiveView is ViewSheet activeSheet))
-                {
-                    TaskDialog.Show(Messages.ERROR_TITLE, Messages.ACTIVE_VIEW_NOT_SHEET);
-                    return Result.Cancelled;
-                }
+                // Валидация входных данных
+                var validationResult = ValidateInput(uiDoc, doc, out ViewSheet activeSheet);
+                if (validationResult != Result.Succeeded) return validationResult;
 
-                // Получаем основные надписи на листе
-                var titleBlocks = GetTitleBlocksOnSheet(doc, activeSheet);
-                if (titleBlocks == null || !titleBlocks.Any())
-                {
-                    TaskDialog.Show(Messages.ERROR_TITLE, Messages.NO_TITLE_BLOCKS_FOUND);
-                    return Result.Cancelled;
-                }
+                // Получаем данные для обработки
+                var processingData = PrepareProcessingData(doc, activeSheet);
+                if (processingData == null) return Result.Cancelled;
 
-                // Получаем виды на листе
-                var viewports = GetViewportsOnSheet(doc, activeSheet);
-                if (viewports == null || !viewports.Any())
-                {
-                    TaskDialog.Show(Messages.ERROR_TITLE, Messages.NO_VIEWS_ON_SHEET);
-                    return Result.Cancelled;
-                }
-
-                // Группируем виды по основным надписям
-                var titleBlockGroups = GroupViewportsByTitleBlocks(doc, titleBlocks, viewports);
-                if (titleBlockGroups.Count <= 1)
-                {
-                    TaskDialog.Show(Messages.ERROR_TITLE, Messages.INSUFFICIENT_TITLE_BLOCKS);
-                    return Result.Cancelled;
-                }
-
-                // Создаем новые листы
-                using (Transaction trans = new Transaction(doc, Messages.TRANSACTION_NAME_COMMAND3))
-                {
-                    trans.Start();
-
-                    int successSheetsCount = CreateSheetsFromTitleBlockGroups(doc, activeSheet, titleBlockGroups);
-
-                    if (successSheetsCount > 0)
-                    {
-                        trans.Commit();
-                        TaskDialog.Show(Messages.SUCCESS_TITLE,
-                            string.Format(Messages.SHEETS_CREATED_SUCCESS, successSheetsCount));
-                        return Result.Succeeded;
-                    }
-                    else
-                    {
-                        trans.RollBack();
-                        TaskDialog.Show(Messages.ERROR_TITLE, Messages.SHEET_CREATION_FAILED);
-                        return Result.Failed;
-                    }
-                }
+                // Выполняем создание листов
+                return ExecuteSheetCreation(doc, activeSheet, processingData);
             }
             catch (Exception ex)
             {
@@ -143,123 +129,105 @@ namespace MagicEntry.Plugins.ViewsToSheets
         #region Private Methods
 
         /// <summary>
-        /// Получает все основные надписи на указанном листе.
+        /// Валидирует входные данные команды.
         /// </summary>
-        private List<FamilyInstance> GetTitleBlocksOnSheet(Document doc, ViewSheet sheet)
+        /// <param name="uiDoc">UI документ</param>
+        /// <param name="doc">Документ</param>
+        /// <param name="activeSheet">Активный лист</param>
+        /// <returns>Результат валидации</returns>
+        private Result ValidateInput(UIDocument uiDoc, Document doc, out ViewSheet activeSheet)
         {
-            var titleBlocks = new List<FamilyInstance>();
+            activeSheet = null;
 
-            var collector = new FilteredElementCollector(doc, sheet.Id)
-                .OfCategory(BuiltInCategory.OST_TitleBlocks)
-                .OfClass(typeof(FamilyInstance));
-
-            foreach (FamilyInstance titleBlock in collector)
+            // Проверяем, что активный вид - это лист
+            if (!(uiDoc.ActiveView is ViewSheet sheet))
             {
-                titleBlocks.Add(titleBlock);
+                TaskDialog.Show(Messages.ERROR_TITLE, Messages.ACTIVE_VIEW_NOT_SHEET);
+                return Result.Cancelled;
             }
 
-            return titleBlocks;
+            activeSheet = sheet;
+            return Result.Succeeded;
         }
 
         /// <summary>
-        /// Получает все виды (viewports) на указанном листе.
+        /// Подготавливает данные для обработки.
         /// </summary>
-        private List<Viewport> GetViewportsOnSheet(Document doc, ViewSheet sheet)
+        /// <param name="doc">Документ</param>
+        /// <param name="activeSheet">Активный лист</param>
+        /// <returns>Данные для обработки или null</returns>
+        private ProcessingData PrepareProcessingData(Document doc, ViewSheet activeSheet)
         {
-            var viewports = new List<Viewport>();
-
-            var viewportIds = sheet.GetAllViewports();
-            foreach (var viewportId in viewportIds)
+            // Получаем основные надписи на листе
+            var titleBlocks = _titleBlockService.GetTitleBlocksOnSheet(doc, activeSheet);
+            if (titleBlocks == null || !titleBlocks.Any())
             {
-                var viewport = doc.GetElement(viewportId) as Viewport;
-                if (viewport != null)
-                {
-                    viewports.Add(viewport);
-                }
+                TaskDialog.Show(Messages.ERROR_TITLE, Messages.NO_TITLE_BLOCKS_FOUND);
+                return null;
             }
 
-            return viewports;
+            // Получаем виды на листе
+            var viewports = _viewService.GetViewportsOnSheet(doc, activeSheet);
+            if (viewports == null || !viewports.Any())
+            {
+                TaskDialog.Show(Messages.ERROR_TITLE, Messages.NO_VIEWS_ON_SHEET);
+                return null;
+            }
+
+            // Группируем виды по основным надписям
+            var titleBlockGroups = _titleBlockService.GroupViewportsByTitleBlocks(doc, titleBlocks, viewports);
+            if (titleBlockGroups.Count <= 1)
+            {
+                TaskDialog.Show(Messages.ERROR_TITLE, Messages.INSUFFICIENT_TITLE_BLOCKS);
+                return null;
+            }
+
+            return new ProcessingData
+            {
+                TitleBlocks = titleBlocks,
+                Viewports = viewports,
+                TitleBlockGroups = titleBlockGroups
+            };
         }
 
         /// <summary>
-        /// Группирует виды по основным надписям на основе пересечения габаритов.
-        /// Виды, которые не попадают в рамку, игнорируются.
+        /// Выполняет создание листов.
         /// </summary>
-        private Dictionary<FamilyInstance, List<Viewport>> GroupViewportsByTitleBlocks(
-            Document doc, List<FamilyInstance> titleBlocks, List<Viewport> viewports)
+        /// <param name="doc">Документ</param>
+        /// <param name="originalSheet">Исходный лист</param>
+        /// <param name="data">Данные для обработки</param>
+        /// <returns>Результат выполнения</returns>
+        private Result ExecuteSheetCreation(Document doc, ViewSheet originalSheet, ProcessingData data)
         {
-            var groups = new Dictionary<FamilyInstance, List<Viewport>>();
-
-            // Инициализируем группы
-            foreach (var titleBlock in titleBlocks)
-                groups[titleBlock] = new List<Viewport>();
-
-            // Перебираем виды
-            foreach (var viewport in viewports)
+            using (Transaction trans = new Transaction(doc, Messages.TRANSACTION_NAME_COMMAND3))
             {
-                Outline vpOutline = viewport.GetBoxOutline();
+                trans.Start();
 
-                FamilyInstance containingTitleBlock = null;
-                foreach (var titleBlock in titleBlocks)
+                int successSheetsCount = CreateSheetsFromTitleBlockGroups(doc, originalSheet, data.TitleBlockGroups);
+
+                if (successSheetsCount > 0)
                 {
-                    Outline tbOutline = GetTitleBlockOutline(titleBlock);
-
-                    bool isIntersect = vpOutline.Intersects(tbOutline, 0.0);
-                    bool isVpInTb = IsOutlineCenterInside(vpOutline, tbOutline);
-
-                    // Проверяем пересечение прямоугольников
-                    if (isIntersect || isVpInTb)
-                    {
-                        containingTitleBlock = titleBlock;
-                        break;
-                    }
+                    trans.Commit();
+                    TaskDialog.Show(Messages.SUCCESS_TITLE,
+                        string.Format(Messages.SHEETS_CREATED_SUCCESS, successSheetsCount));
+                    return Result.Succeeded;
                 }
-
-                // Если не нашли рамку — пропускаем
-                if (containingTitleBlock != null)
-                    groups[containingTitleBlock].Add(viewport);
+                else
+                {
+                    trans.RollBack();
+                    TaskDialog.Show(Messages.ERROR_TITLE, Messages.SHEET_CREATION_FAILED);
+                    return Result.Failed;
+                }
             }
-
-            return groups;
         }
-
-        private bool IsOutlineCenterInside(Outline inner, Outline outer)
-        {
-            if (inner == null || outer == null)
-                return false;
-
-            // Центр по XY
-            XYZ center = (inner.MinimumPoint + inner.MaximumPoint) / 2;
-
-            return
-                center.X >= outer.MinimumPoint.X &&
-                center.X <= outer.MaximumPoint.X &&
-                center.Y >= outer.MinimumPoint.Y &&
-                center.Y <= outer.MaximumPoint.Y;
-        }
-
-
-        private Outline GetTitleBlockOutline(FamilyInstance titleBlock)
-        {
-            LocationPoint loc = titleBlock.Location as LocationPoint;
-            if (loc == null) return null;
-
-            XYZ origin = loc.Point; // точка вставки (нижний правый угол)
-
-            double width = titleBlock.get_Parameter(BuiltInParameter.SHEET_WIDTH).AsDouble();
-            double height = titleBlock.get_Parameter(BuiltInParameter.SHEET_HEIGHT).AsDouble();
-
-            // Нижний левый и верхний правый
-            XYZ min = new XYZ(origin.X - width, origin.Y, 0);
-            XYZ max = new XYZ(origin.X, origin.Y + height, 0);
-
-            return new Outline(min, max);
-        }
-
 
         /// <summary>
         /// Создает новые листы для каждой группы основных надписей и переносит виды.
         /// </summary>
+        /// <param name="doc">Документ</param>
+        /// <param name="originalSheet">Исходный лист</param>
+        /// <param name="titleBlockGroups">Группы основных надписей</param>
+        /// <returns>Количество успешно созданных листов</returns>
         private int CreateSheetsFromTitleBlockGroups(Document doc, ViewSheet originalSheet,
             Dictionary<FamilyInstance, List<Viewport>> titleBlockGroups)
         {
@@ -268,37 +236,18 @@ namespace MagicEntry.Plugins.ViewsToSheets
             {
                 var groupsList = titleBlockGroups.ToList();
 
-                // Оставляем первую группу на исходном листе, создаем новые листы для остальных
+                // Создаем новые листы для всех групп кроме первой
                 for (int i = 1; i < groupsList.Count; i++)
                 {
-                    FamilyInstance originalTitleBlock = groupsList[i].Key;
-                    List<Viewport> viewports = groupsList[i].Value;
-                    if (viewports.Count == 0) continue;
-
-                    // Создаем новый лист
-                    ViewSheet newSheet = CreateNewSheet(doc, originalSheet, originalTitleBlock, viewports, i);
-                    if (newSheet == null) continue;
-
-
-                    // Переносим виды на новый лист с сохранением относительного положения
-                    MoveViewportsToSheet(doc, titleBlockGroups, i, newSheet);
-
-
-                    // Копируем параметры листа
-                    ParameterCopyService.CopySheetParameters(originalSheet, newSheet);
-                    // Копируем параметры основной надписи
-                    var targetTitleBlock = GetTitleBlocksOnSheet(doc, newSheet).FirstOrDefault();
-                    ParameterCopyService.CopyTitleBlockParameters(originalTitleBlock, targetTitleBlock);
-
-                    successSheetsCount++;
+                    if (CreateSingleSheet(doc, originalSheet, titleBlockGroups, i))
+                    {
+                        successSheetsCount++;
+                    }
                 }
 
                 // Удаляем лишние основные надписи с исходного листа
-                for (int i = 1; i < groupsList.Count; i++)
-                {
-                    if(groupsList[i].Value.Count !=0)
-                    doc.Delete(groupsList[i].Key.Id);
-                }
+                CleanupOriginalSheet(doc, groupsList);
+
                 return successSheetsCount;
             }
             catch
@@ -308,169 +257,83 @@ namespace MagicEntry.Plugins.ViewsToSheets
         }
 
         /// <summary>
-        /// Создает новый лист на основе исходного.
+        /// Создает один лист для указанной группы.
         /// </summary>
-        private ViewSheet CreateNewSheet(Document doc, ViewSheet originalSheet, FamilyInstance titleBlock, List<Viewport> viewports, int index)
+        /// <param name="doc">Документ</param>
+        /// <param name="originalSheet">Исходный лист</param>
+        /// <param name="titleBlockGroups">Все группы</param>
+        /// <param name="index">Индекс группы</param>
+        /// <returns>True в случае успеха</returns>
+        private bool CreateSingleSheet(Document doc, ViewSheet originalSheet,
+            Dictionary<FamilyInstance, List<Viewport>> titleBlockGroups, int index)
         {
-            try
-            {
-                var sheetTypeId = originalSheet.GetTypeId();
-                var sheetType = doc.GetElement(sheetTypeId) as ElementType;
+            var groupsList = titleBlockGroups.ToList();
+            FamilyInstance originalTitleBlock = groupsList[index].Key;
+            List<Viewport> viewports = groupsList[index].Value;
 
-                if (sheetType == null) return null;
+            if (viewports.Count == 0) return false;
 
-                // Создаем уникальный номер и имя листа
-                string sheetName = GetViewsNamesString(doc, viewports);
-                sheetName = GetUniqueViewName(doc, sheetName);
-                string sheetNumber = $"{originalSheet.SheetNumber}-{index}";
-                sheetNumber = GetUniqueSheetNumber(doc, sheetNumber);
+            // Создаем новый лист
+            ViewSheet newSheet = _sheetService.CreateNewSheet(doc, originalSheet, originalTitleBlock, viewports);
+            if (newSheet == null) return false;
 
-                // Берем ID типа основной надписи из оригинального листа
-                ElementId titleBlockTypeId = titleBlock.GetTypeId();
-                if (titleBlockTypeId == ElementId.InvalidElementId)
-                {
-                    // Берем случайный тип основной надписи
-                    FilteredElementCollector collector = new FilteredElementCollector(doc);
-                    titleBlockTypeId = collector
-                        .OfCategory(BuiltInCategory.OST_TitleBlocks)
-                        .OfClass(typeof(FamilySymbol))
-                        .FirstElementId();
-                }
+            // Переносим виды на новый лист
+            _placementService.MoveViewportsToSheet(doc, titleBlockGroups, index, newSheet);
 
-                ViewSheet newSheet = ViewSheet.Create(doc, titleBlockTypeId);
-                if (newSheet == null) return null;
+            // Копируем параметры
+            CopyParameters(originalSheet, newSheet, originalTitleBlock);
 
-                newSheet.SheetNumber = sheetNumber;
-                newSheet.Name = sheetName;
-
-                return newSheet;
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Ошибка создания листа: {ex.Message}");
-                return null;
-            }
+            return true;
         }
-
-        private string GetUniqueViewName(Document doc, string baseName)
-        {
-            var existingNames = new FilteredElementCollector(doc)
-                .OfClass(typeof(View))
-                .Cast<View>()
-                .Select(v => v.Name)
-                .ToHashSet();
-
-            if (!existingNames.Contains(baseName))
-                return baseName;
-
-            int counter = 1;
-            string newName;
-            do
-            {
-                newName = $"{baseName} ({counter})";
-                counter++;
-            }
-            while (existingNames.Contains(newName));
-
-            return newName;
-        }
-
-        private string GetUniqueSheetNumber(Document doc, string baseNumber)
-        {
-            var existingNumbers = new FilteredElementCollector(doc)
-                .OfClass(typeof(ViewSheet))
-                .Cast<ViewSheet>()
-                .Select(s => s.SheetNumber)
-                .ToHashSet();
-
-            if (!existingNumbers.Contains(baseNumber))
-                return baseNumber;
-
-            int counter = 1;
-            string newNumber;
-            do
-            {
-                newNumber = $"{baseNumber} ({counter})";
-                counter++;
-            }
-            while (existingNumbers.Contains(newNumber));
-
-            return newNumber;
-        }
-
-        private string GetViewsNamesString(Document doc, List<Viewport> viewports)
-        {
-            var names = viewports
-                .Select(vp => doc.GetElement(vp.ViewId) as View)
-                .Where(v => v != null)
-                .Select(v => v.Name)
-                .ToList();
-
-            return string.Join(". ", names);
-        }
-
 
         /// <summary>
-        /// Переносит виды из i-й группы (основная надпись + её виды)
-        /// на новый лист с сохранением относительного положения
-        /// относительно LocationPoint рамки.
+        /// Копирует параметры на новый лист.
         /// </summary>
-        private void MoveViewportsToSheet(
-            Document doc,
-            Dictionary<FamilyInstance, List<Viewport>> titleBlockGroups,
-            int i,
-            ViewSheet targetSheet)
+        /// <param name="originalSheet">Исходный лист</param>
+        /// <param name="newSheet">Новый лист</param>
+        /// <param name="originalTitleBlock">Исходная основная надпись</param>
+        private void CopyParameters(ViewSheet originalSheet, ViewSheet newSheet, FamilyInstance originalTitleBlock)
         {
-            if (i < 0 || i >= titleBlockGroups.Count) return;
+            // Копируем параметры листа
+            ParameterCopyService.CopySheetParameters(originalSheet, newSheet);
 
-            // Берём i-ю пару (рамка + виды)
-            var pair = titleBlockGroups.ElementAt(i);
-            FamilyInstance titleBlock = pair.Key;
-            List<Viewport> viewports = pair.Value;
-
-            LocationPoint loc = titleBlock.Location as LocationPoint;
-            if (loc == null) return;
-
-            XYZ basePoint = loc.Point; // нижний правый угол рамки
-
-            foreach (var viewport in viewports)
+            // Копируем параметры основной надписи
+            var targetTitleBlock = _titleBlockService.GetTitleBlocksOnSheet(newSheet.Document, newSheet).FirstOrDefault();
+            if (targetTitleBlock != null)
             {
-                View view = doc.GetElement(viewport.ViewId) as View;
-                if (view == null) continue;
-
-                Outline outline = viewport.GetBoxOutline();
-                XYZ min = outline.MinimumPoint;
-                XYZ max = outline.MaximumPoint;
-
-                // Размеры рамки вида
-                double width = max.X - min.X;
-                double height = max.Y - min.Y;
-
-                // Относительное смещение (берем верхний правый угол)
-                XYZ currentPos = max;
-                XYZ relativeOffset = currentPos - basePoint;
-
-                // Удаляем старый viewport
-                doc.Delete(viewport.Id);
-
-                // Новая позиция = базовая точка + смещение - ширина (влево) - высота (вниз)
-                XYZ newPos = relativeOffset - new XYZ(width/2, height/2, 0);
-
-                if (Viewport.CanAddViewToSheet(doc, targetSheet.Id, view.Id))
-                {
-                    Viewport newVp = Viewport.Create(doc, targetSheet.Id, view.Id, newPos);
-                    if (newVp == null)
-                        System.Diagnostics.Debug.WriteLine($"Ошибка: не удалось создать viewport для вида {view.Name}");
-                }
-                else
-                {
-                    System.Diagnostics.Debug.WriteLine($"Вид {view.Name} нельзя добавить на лист {targetSheet.Name}");
-                }
+                ParameterCopyService.CopyTitleBlockParameters(originalTitleBlock, targetTitleBlock);
             }
-
         }
 
+        /// <summary>
+        /// Очищает исходный лист от лишних основных надписей.
+        /// </summary>
+        /// <param name="doc">Документ</param>
+        /// <param name="groupsList">Список групп</param>
+        private void CleanupOriginalSheet(Document doc, List<KeyValuePair<FamilyInstance, List<Viewport>>> groupsList)
+        {
+            for (int i = 1; i < groupsList.Count; i++)
+            {
+                if (groupsList[i].Value.Count != 0)
+                {
+                    doc.Delete(groupsList[i].Key.Id);
+                }
+            }
+        }
 
+        #endregion
+
+        #region Helper Classes
+
+        /// <summary>
+        /// Класс для хранения данных обработки.
+        /// </summary>
+        private class ProcessingData
+        {
+            public List<FamilyInstance> TitleBlocks { get; set; }
+            public List<Viewport> Viewports { get; set; }
+            public Dictionary<FamilyInstance, List<Viewport>> TitleBlockGroups { get; set; }
+        }
 
         #endregion
     }
