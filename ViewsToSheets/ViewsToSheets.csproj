@@ -47,6 +47,8 @@
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="Microsoft.CSharp" />
@@ -57,6 +59,7 @@
   <ItemGroup>
     <Compile Include="Commands\CreateSheetsFromTitleBlocksCommand.cs" />
     <Compile Include="Commands\PlaceViewsInColumnCommand.cs" />
+    <Compile Include="Commands\ShowInfoCommand.cs" />
     <Compile Include="Constants\Constants.cs" />
     <Compile Include="Constants\Messages.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -65,6 +68,9 @@
     <Compile Include="Servises\TitleBlockService.cs" />
     <Compile Include="Servises\ViewportPlacementService.cs" />
     <Compile Include="Servises\ViewService.cs" />
+    <Compile Include="UI\InfoWindowForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
